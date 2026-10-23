@@ -9,13 +9,11 @@ def sigmoide(z):
     z = np.asarray(z, dtype=np.float64)
     return np.exp(-np.logaddexp(0, -z))
 
-def perdida_logistica(y, z):
-    return np.logaddexp(0, z) - y * z
-
+#p=sigma(z)=1/1+e^-z
 def calcular_derivadas(y, z):
     p = sigmoide(z)
-    gradiente = p - y
-    hessiano = p * (1 - p)
+    gradiente = p - y # primera derivada
+    hessiano = p * (1 - p) # segunda derivada
     return gradiente, hessiano
 
 
@@ -31,40 +29,60 @@ def objetivo_personalizado(predicciones, dtrain):
     return gradiente, hessiano
 
 
-#3. Balanceo de clases
-def calcular_pesos(y):
-    clases, cantidades = np.unique(y, return_counts=True)
+#3. Balanceo por clase y participante
+# b_i = N / (2 * P_y * n_pid)
+# N: número total de mediciones de Train
+# P_y: número de participantes de la clase y
+# n_pid: número de mediciones del participante
 
-    if len(clases) != 2:
-        raise ValueError("Train debe contener ambas clases.")
+def calcular_pesos(datos):
+    N = len(datos)
 
-    #Calcula pesos para cada clase
-    pesos_clase = len(y) / (2 * cantidades)
-    peso_clase_0 = pesos_clase[0]
-    peso_clase_1 = pesos_clase[1]
+    #participantes únicos con su clase
+    participantes = datos[["pid", "label"]].drop_duplicates()
+
+    #cantidad de participantes por clase
+    participantes_por_clase = (
+        participantes["label"]
+        .value_counts()
+    )
+
+    #cantidad de mediciones por participante
+    mediciones_por_participante = (
+        datos.groupby("pid")
+        .size()
+    )
+
     pesos = []
 
-    #Asigna pesos a cada muestra según su clase
-    for etiqueta in y:
-        if etiqueta == clases[0]:
-            pesos.append(peso_clase_0)
-        else:
-            pesos.append(peso_clase_1)
+    #calcula el peso de cada medición
+    for indice in datos.index:
+        pid = datos.at[indice, "pid"]
+        clase = datos.at[indice, "label"]
+
+        P_y = participantes_por_clase[clase]
+        n_pid = mediciones_por_participante[pid]
+
+        peso = N / (2 * P_y * n_pid)
+        pesos.append(peso)
+
     return np.array(pesos)
 
 
 #4. Evaluacion por participante
-def evaluar(y, probabilidades):
+def evaluar(y, probabilidades, threshold=0.35):
 
-    # Convierte probabilidades a predicciones binarias
     predicciones = []
+
     for probabilidad in probabilidades:
-        if probabilidad >= 0.5:
+        if probabilidad >= threshold:
             predicciones.append(1)
         else:
             predicciones.append(0)
+
     predicciones = np.array(predicciones)
 
+    print("Threshold:", threshold)
     print("Accuracy:", accuracy_score(y, predicciones))
     print("Precision:", precision_score(y, predicciones, zero_division=0))
     print("Recall:", recall_score(y, predicciones, zero_division=0))
@@ -76,7 +94,7 @@ def evaluar(y, probabilidades):
 
 if __name__ == "__main__":
 
-    #5. Carga Train y Validation
+#5. Carga Train y Validation
     ruta = Path(__file__).resolve().parent / "datos_temporales"
     train = pd.read_csv(ruta / "train.csv")
     validation = pd.read_csv(ruta / "validation.csv")
@@ -89,12 +107,6 @@ if __name__ == "__main__":
         "steps_last_five_mins", "steps_last_thirty_mins"
     ]
 
-    #6. Define las variables de entrada del modelo
-    columnas_delta = []
-    for columna in columnas:
-        nombre_delta = "delta_" + columna
-        columnas_delta.append(nombre_delta)
-    columnas = columnas + columnas_delta
 
     # Prepara datos para XGBoost
     X_train = train[columnas].astype("float32")
@@ -122,29 +134,31 @@ if __name__ == "__main__":
     print("\nDistribucion de mediciones en Train:")
     print(pd.Series(y_train).value_counts().sort_index())
 
-    print("\nValores faltantes en deltas de Train:")
-    columnas_delta = [c for c in columnas if c.startswith("delta_")]
-    print(X_train[columnas_delta].isna().sum())
+
+#7. Calcula pesos de clase y prepara los datos para XGBoost
+    pesos = calcular_pesos(train)
+
+    print("\nPesos base:")
+    print("Media:", pesos.mean())
+    print("Suma total:", pesos.sum())
+
+    print("Masa total clase 0:",pesos[y_train == 0].sum())
+    print("Masa total clase 1:",pesos[y_train == 1].sum())
+
+    print("Peso minimo:", pesos.min())
+    print("Peso maximo:", pesos.max())
 
 
-    #7. Calcula pesos de clase y prepara los datos para XGBoost
-    pesos = calcular_pesos(y_train)
-
-    print("\nPesos de clase:")
-    print("Peso clase 0:", pesos[y_train == 0][0])
-    print("Peso clase 1:", pesos[y_train == 1][0])
-    print("Relacion positivo/negativo:", pesos[y_train == 1][0] / pesos[y_train == 0][0])
-
-    # Prepara DMatrix para XGBoost
+#8. Prepara DMatrix para XGBoost
     dtrain = xgb.DMatrix(X_train, label=y_train, weight=pesos)
     dval = xgb.DMatrix(X_val, label=y_val)
 
     # Define parametros del modelo
     parametros = {
-        "objective": "binary:logistic",
+        "objective": "binary:logistic", ##clasificación binaria logística
         "base_score": 0.5,
-        "eta": 0.1,
-        "max_depth": 3,
+        "eta": 0.3,
+        "max_depth": 6,
         "min_child_weight": 1,
         "subsample": 1.0,
         "colsample_bytree": 1.0,
@@ -157,19 +171,22 @@ if __name__ == "__main__":
         "disable_default_eval_metric": 1
     }
 
-    #8. Entrenamiento del modelo con el gradiente y Hessiano implementados
+###libreria
+#9. Entrenamiento del modelo con el gradiente y Hessiano implementados
     modelo = xgb.train(
         params=parametros,
         dtrain=dtrain,
-        num_boost_round=100,
+        num_boost_round=200,
         obj=objetivo_personalizado
     )
 
+    #Evaluación en Validation
     # Obtiene la salida del modelo y la convierte en probabilidades
-    margenes = modelo.predict(dval, output_margin=True)
-    probabilidades = sigmoide(margenes)
+    salidas_modelo = modelo.predict(dval, output_margin=True)
+    probabilidades = sigmoide(salidas_modelo)
 
-    #9. Evaluacion por participante
+
+#10. Evaluacion por participante
     resultados = pd.DataFrame({
         "pid": validation["pid"].to_numpy(),
         "label": y_val,
@@ -189,11 +206,11 @@ if __name__ == "__main__":
     evaluar(participantes["label"].to_numpy(),participantes["probabilidad"].to_numpy())
 
 
-    #10. Valida la funcion objetivo personalizada contra XGBoost oficial
+#11. Valida la funcion objetivo personalizada contra XGBoost oficial
     modelo_oficial = xgb.train(
         params=parametros,
         dtrain=dtrain,
-        num_boost_round=100)
+        num_boost_round=200)
 
     probabilidades_oficial = modelo_oficial.predict(dval)
     diferencia = np.abs(probabilidades - probabilidades_oficial)
@@ -201,7 +218,3 @@ if __name__ == "__main__":
     print("\nComparacion con XGBoost oficial:")
     print("Diferencia maxima:", diferencia.max())
     print("Diferencia promedio:", diferencia.mean())
-    print(
-        "Clasificaciones diferentes:",
-        np.sum((probabilidades >= 0.5) !=(probabilidades_oficial >= 0.5))
-    )
